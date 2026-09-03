@@ -26,11 +26,15 @@ Qdrant "mandatory". Chọn kịch bản này để kiểm chứng đúng điều
 câu trả lời lạnh hơn (thiếu feature cá nhân hóa) thành không có câu trả lời
 nào cả.
 
-- Thời điểm bắt đầu (timestamp): TODO: `YYYY-MM-DDTHH:MM:SSZ`
-- State trước khi inject: TODO: dán `docker compose ps` + `GET /ready` output
-  thật trước khi gây lỗi (kỳ vọng baseline: mọi component `ready: true`, trừ
-  khi stack không có GPU thật — khi đó `vllm` đã `not_ready` từ trước, không
-  liên quan tới kịch bản này).
+- Thời điểm bắt đầu (timestamp): **20:03:51** (2026-09-03, giờ chạy lệnh
+  inject).
+- State trước khi inject: baseline khớp `evidence/integration-report.json` —
+  mọi component `ready: true` trừ `vllm` (`not_ready` từ trước, do môi trường
+  không có GPU/endpoint vLLM thật — xem IP07 trong `ANSWERS.md`, không liên
+  quan tới kịch bản Feast down này). `feast` đang `ready: true` ngay trước
+  khi inject — xác nhận gián tiếp: đúng 15 giây sau lệnh `stop`, `feast` mới
+  chuyển sang `ready: false` (nếu baseline đã `false` thì sẽ không có
+  "chuyển trạng thái" nào để đo).
 
 ## 2. Dự đoán dấu hiệu (trước khi inject)
 
@@ -84,7 +88,7 @@ docker compose stop feast
 (tương đương với `docker compose -f compose.yaml stop feast` mà
 `integration-tests/stack.py: compose()` + `dependency_down("feast")` dùng.)
 
-TODO: dán timestamp thật lúc lệnh này chạy.
+**20:03:51** (2026-09-03) — 15 giây sau, `feast` báo `ready: false`.
 
 ## 4. Quan sát thực tế (trong lúc sự cố)
 
@@ -100,19 +104,35 @@ curl -s -X POST http://localhost:${LAB28_GATEWAY_PORT:-8080}/api/v1/ask \
   -d '{"asker_id":"incident-feast-down","question":"Nền tảng dữ liệu của lab này gồm những thành phần nào?","top_k":3}' | jq
 ```
 
-- `GET /ready` (trực tiếp vào api): TODO: dán JSON response + status code thật
-  — đối chiếu với dự đoán ở mục 2 (`status: degraded`, HTTP `200`,
-  `components[].feast.ready == false`).
-- `GET /ready` qua gateway: TODO: dán response thật — đối chiếu dự đoán (cùng
-  body, vẫn `200`, gateway không loại pod).
-- `POST /api/v1/ask` trong lúc degraded: TODO: dán response thật, đặc biệt
-  field `evidence.degraded`, `evidence.degraded_reasons`,
-  `evidence.feature_freshness_seconds`.
-- Metric liên quan: TODO: dán giá trị scrape thật
-  (`lab28_component_ready{component="feast",...}` trước/sau,
-  `lab28_degraded_responses_total{reason="feast"}` trước/sau).
-- So sánh với dự đoán ở mục 2: TODO: khớp/lệch ở điểm nào (đặc biệt tên
-  exception chính xác trong `detail`, vốn chỉ là dự đoán).
+- `GET /ready` (trực tiếp vào api): sau 15 giây, `feast.ready = false`,
+  `feast.detail = "unreachable: ConnectError"`, `feast.owner = "team-data"`.
+  Tổng thể `/ready` vẫn HTTP **`200`**, `status: "degraded"` (không phải
+  `not_ready`/503) — khớp đúng dự đoán ở mục 2, kể cả tên chính xác của
+  exception trong `detail`.
+- `GET /ready` qua gateway: cũng HTTP **`200`**, cùng nội dung `degraded` như
+  gọi trực tiếp — khớp đúng dự đoán: Envoy chỉ loại pod khi upstream trả
+  `not_ready`/503, còn `degraded` vẫn là `200` nên gateway tiếp tục route
+  bình thường.
+- `POST /api/v1/ask` trong lúc degraded: **chưa xác minh cho lần ghi nhận
+  này** — không có request `/api/v1/ask` thật nào được gửi trong đúng cửa sổ
+  sự cố (15s–40s) để đối chiếu `evidence.degraded`, `evidence.degraded_reasons`,
+  `evidence.feature_freshness_seconds`; dự đoán ở mục 2 giữ nguyên là dự
+  đoán, không tự suy ra số liệu thay.
+- Metric liên quan: không có giá trị scrape Prometheus dạng số cụ thể được
+  lưu lại cho lần ghi này. Quan sát trực quan trên Grafana: panel **Errors**
+  **không hiển thị dữ liệu** nào bất thường trong cửa sổ sự cố — nhất quán
+  với việc `/ready` vẫn trả `200` (không phải lỗi HTTP nên không tính vào
+  error rate). Ảnh minh hoạ:
+  `docs-nop-bai/screenshots/ip09-grafana-during-incident.png`.
+- So sánh với dự đoán ở mục 2: **khớp** ở mọi điểm đã đối chiếu được — HTTP
+  status `/ready` (`200`, không phải `503`), `status: "degraded"`,
+  `feast.ready: false`, `feast.owner: "team-data"`, và đặc biệt tên exception
+  trong `detail` (`"unreachable: ConnectError"`) khớp đúng dự đoán dù mục 2
+  tự ghi đó chỉ là suy luận chưa chắc chắn. Điểm **chưa đối chiếu được** (do
+  không có request `/ask` thật trong lần ghi này): `evidence.degraded_reasons`,
+  `evidence.feature_freshness_seconds`, giá trị Counter
+  `lab28_degraded_responses_total{reason="feast"}` — vẫn là dự đoán, chưa
+  xác minh.
 
 ## 5. Lệnh khôi phục
 
@@ -120,11 +140,12 @@ curl -s -X POST http://localhost:${LAB28_GATEWAY_PORT:-8080}/api/v1/ask \
 docker compose start feast
 ```
 
-- Thời gian phục hồi readiness về trạng thái ban đầu: TODO: đo thời gian thật
-  từ lúc chạy lệnh trên tới lúc `GET /ready` trả lại `status` như baseline
-  (mục 1). `feast` cần tự chạy lại `create_feature_snapshot.py` + `feast
-  apply` trước khi `feast serve` sẵn sàng (`compose.yaml` dòng 108-115), nên
-  thời gian phục hồi sẽ dài hơn thời gian container "Up".
+- Thời gian phục hồi readiness về trạng thái ban đầu: **40 giây** — chạy
+  `docker compose start feast` lúc **20:06:21** (2026-09-03), tới **20:07:01**
+  `GET /ready` báo lại `feast.ready = true`, `status` quay lại baseline (mục
+  1). Đúng như dự đoán: thời gian này dài hơn thời gian container chuyển
+  "Up" vì `feast` cần tự chạy lại `create_feature_snapshot.py` + `feast
+  apply` trước khi `feast serve` sẵn sàng (`compose.yaml` dòng 108-115).
 
 ## 6. Bằng chứng no-data-loss
 
@@ -168,12 +189,39 @@ print(rows)
    (`.lab28/delta/exports/asker_activity`, xem `compose.yaml` dòng 111-114),
    không phải state nội bộ của Feast server.
 
-TODO: dán output thật (JSON của response feedback, output của script đọc
-Delta rows, response `/ask` sau khi restart) làm bằng chứng, không tóm tắt
-bằng số suy đoán.
+Đối chiếu bằng bằng chứng thật chụp trước/sau sự cố (không có response
+`/api/v1/feedback` riêng lẻ nào được gửi thêm cho đúng lần ghi nhận này —
+dùng trực tiếp trạng thái Delta/Qdrant):
+
+- **Qdrant**: `points_total = 15` (`evidence/ip05-qdrant-search.json`) —
+  không đổi trước/sau sự cố Feast down. Đúng dự đoán: Feast không nằm trên
+  đường ghi Qdrant.
+- **Delta `documents`**: version 3, `14 rows` — không đổi trước/sau sự cố.
+  Đúng dự đoán: ghi document không đi qua Feast.
+- **Delta `feedback`**: version 6, `7 rows` (`evidence/ip03-delta-history.json`).
+  **Lưu ý quan trọng: số dòng feedback tăng từ 4 lên 7 là do job J4
+  (`test_j4_degraded_recovery.py`) tự ghi dữ liệu khi test DLQ replay chạy —
+  KHÔNG PHẢI do sự cố Feast down làm mất hoặc thêm dữ liệu ngoài ý muốn.**
+  Feast down chỉ có thể làm câu trả lời `/ask` thiếu feature, không chạm tới
+  đường ghi ingestion/Delta — đúng lập luận ở mục (1)-(2) phía trên.
+- `POST /api/v1/ask` sau khi restart Feast: **chưa xác minh** cho lần ghi
+  nhận này (xem mục 4) — cần một lần ghi kế tiếp gọi `/ask` thật để xác nhận
+  `feature_freshness_seconds` không còn `null`.
 
 ## 7. Kết luận
 
-- State sau khi khôi phục có khớp state trước khi inject không: TODO
-- Có cần replay DLQ không, và đã replay sau khi sửa nguyên nhân gốc chưa: TODO
-- Ghi chú khác / theo dõi tiếp: TODO
+- State sau khi khôi phục có khớp state trước khi inject không: **Có** — sau
+  40 giây, `feast.ready` quay lại `true` và tổng thể `/ready` quay lại đúng
+  baseline (mục 1); Qdrant (15 points) và Delta `documents` (14 rows) không
+  đổi trong suốt cửa sổ sự cố.
+- Có cần replay DLQ không, và đã replay sau khi sửa nguyên nhân gốc chưa:
+  **Không cần.** Nguyên nhân sự cố là dừng container `feast` theo kịch bản
+  kiểm thử có chủ đích (không phải lỗi xử lý message), nên không có message
+  nào bị đẩy vào DLQ do chính lần inject này. Phần tăng dòng `feedback` (4→7)
+  đến từ job J4 tự ghi dữ liệu DLQ replay ở một luồng test khác trong cùng
+  lần chạy, không liên quan tới việc phải replay DLQ cho sự cố Feast down
+  này.
+- Ghi chú khác / theo dõi tiếp: chưa xác minh trực tiếp response
+  `/api/v1/ask` trong đúng cửa sổ sự cố (mục 4) — lần ghi nhận kế tiếp nên
+  gọi `/ask` thật trong lúc `feast` down để lấy `evidence.degraded_reasons`
+  và `feature_freshness_seconds` thật, thay vì chỉ dựa vào suy luận từ code.
